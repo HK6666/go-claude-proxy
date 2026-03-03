@@ -139,6 +139,10 @@ func (a *CustomAdapter) Execute(ctx context.Context, w http.ResponseWriter, req 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
 		log.Printf("[Upstream] %d error from %s: %s", resp.StatusCode, upstreamURL, string(body))
+		// Log the request body that caused the error for debugging
+		if resp.StatusCode == 400 {
+			log.Printf("[Upstream] Request body that caused 400:\n%s", string(upstreamBody))
+		}
 		// Capture error response info
 		if attempt := ctxutil.GetUpstreamAttempt(ctx); attempt != nil {
 			attempt.ResponseInfo = &domain.ResponseInfo{
