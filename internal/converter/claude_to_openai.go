@@ -84,11 +84,23 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 						})
 					case "tool_result":
 						toolUseID, _ := m["tool_use_id"].(string)
-						content, _ := m["content"].(string)
-						// Collect tool results to add after the assistant message
+						// tool_result content can be a string or array of content blocks
+						var resultContent string
+						switch c := m["content"].(type) {
+						case string:
+							resultContent = c
+						case []interface{}:
+							for _, block := range c {
+								if bm, ok := block.(map[string]interface{}); ok {
+									if text, ok := bm["text"].(string); ok {
+										resultContent += text
+									}
+								}
+							}
+						}
 						toolResults = append(toolResults, OpenAIMessage{
 							Role:       "tool",
-							Content:    content,
+							Content:    resultContent,
 							ToolCallID: toolUseID,
 						})
 					}
@@ -103,14 +115,19 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 				openaiMsg.Content = parts
 			}
 		}
-		// Add the assistant message (if it has content or tool_calls)
-		if openaiMsg.Content != nil || len(openaiMsg.ToolCalls) > 0 {
+		// Tool results must immediately follow the assistant message with tool_calls.
+		// When a Claude user message contains both tool_result and text blocks,
+		// emit tool results first, then the text as a separate user message.
+		if len(toolResults) > 0 {
+			for _, toolResult := range toolResults {
+				openaiReq.Messages = append(openaiReq.Messages, toolResult)
+			}
+			// Add remaining text content as a separate user message after tool results
+			if openaiMsg.Content != nil {
+				openaiReq.Messages = append(openaiReq.Messages, openaiMsg)
+			}
+		} else if openaiMsg.Content != nil || len(openaiMsg.ToolCalls) > 0 {
 			openaiReq.Messages = append(openaiReq.Messages, openaiMsg)
-		}
-		// Add tool results after the assistant message
-		// This ensures tool messages follow the message with tool_calls
-		for _, toolResult := range toolResults {
-			openaiReq.Messages = append(openaiReq.Messages, toolResult)
 		}
 	}
 
