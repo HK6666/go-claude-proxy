@@ -196,7 +196,76 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 		}
 	}
 
+	// Validate and fix message ordering:
+	// OpenAI requires tool messages to immediately follow the assistant message with matching tool_calls.
+	// Drop orphaned tool messages and ensure no invalid sequences.
+	openaiReq.Messages = fixToolMessageOrdering(openaiReq.Messages)
+
 	return json.Marshal(openaiReq)
+}
+
+// fixToolMessageOrdering validates and fixes message ordering for OpenAI compatibility.
+// OpenAI requires: tool messages MUST immediately follow the assistant message with matching tool_calls.
+// This function:
+// 1. Drops empty assistant messages (e.g., thinking-only blocks that were stripped)
+// 2. Collects tool_call IDs from each assistant message
+// 3. Ensures tool messages follow their corresponding assistant message
+// 4. Drops orphaned tool messages with no matching tool_call
+func fixToolMessageOrdering(messages []OpenAIMessage) []OpenAIMessage {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	// First pass: drop empty assistant messages (thinking-only that were stripped)
+	var cleaned []OpenAIMessage
+	for _, msg := range messages {
+		if msg.Role == "assistant" && isEmptyContent(msg.Content) && len(msg.ToolCalls) == 0 {
+			continue
+		}
+		cleaned = append(cleaned, msg)
+	}
+
+	// Second pass: build a set of all valid tool_call IDs from assistant messages,
+	// and ensure each tool message follows its corresponding assistant.
+	// Strategy: collect all tool_call IDs, then validate tool messages are in correct position.
+	var result []OpenAIMessage
+	// Track which tool_call IDs are "active" (the most recent assistant's tool_calls)
+	var activeToolCallIDs map[string]bool
+
+	for _, msg := range cleaned {
+		if msg.Role == "assistant" {
+			// Update active tool_call IDs
+			activeToolCallIDs = make(map[string]bool)
+			for _, tc := range msg.ToolCalls {
+				activeToolCallIDs[tc.ID] = true
+			}
+			result = append(result, msg)
+		} else if msg.Role == "tool" {
+			// Validate: the tool message must match an active tool_call from the last assistant
+			if activeToolCallIDs != nil && activeToolCallIDs[msg.ToolCallID] {
+				result = append(result, msg)
+				delete(activeToolCallIDs, msg.ToolCallID) // Mark as consumed
+			}
+			// else: orphaned tool message, drop it
+		} else {
+			// user/system message - clear active tool calls
+			activeToolCallIDs = nil
+			result = append(result, msg)
+		}
+	}
+
+	return result
+}
+
+// isEmptyContent checks if message content is effectively empty
+func isEmptyContent(content interface{}) bool {
+	if content == nil {
+		return true
+	}
+	if s, ok := content.(string); ok && s == "" {
+		return true
+	}
+	return false
 }
 
 func (c *claudeToOpenAIResponse) Transform(body []byte) ([]byte, error) {
