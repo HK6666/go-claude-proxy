@@ -18,11 +18,6 @@ const (
 	LoadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
 	FetchModelsURL    = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
 
-	// OAuth Client Credentials (from Antigravity Manager)
-	// Use environment variables ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET
-	OAuthClientID     = getEnvOrDefault("ANTIGRAVITY_CLIENT_ID", "")
-	OAuthClientSecret = getEnvOrDefault("ANTIGRAVITY_CLIENT_SECRET", "")
-
 	// User-Agent (必须与 Antigravity 客户端一致)
 	// loadCodeAssist 使用不带版本号的 User-Agent
 	UserAgentLoadCodeAssist = "antigravity/windows/amd64"
@@ -33,6 +28,13 @@ const (
 
 	// 默认 Project ID (当 API 未返回时使用)
 	DefaultProjectID = "bamboo-precept-lgxtn"
+)
+
+// OAuth Client Credentials (from Antigravity Manager)
+// Use environment variables ANTIGRAVITY_CLIENT_ID and ANTIGRAVITY_CLIENT_SECRET
+var (
+	OAuthClientID     = getEnvOrDefault("ANTIGRAVITY_CLIENT_ID", "")
+	OAuthClientSecret = getEnvOrDefault("ANTIGRAVITY_CLIENT_SECRET", "")
 )
 
 // UserInfo 用户信息

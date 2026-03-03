@@ -110,9 +110,11 @@ func (a *CustomAdapter) Execute(ctx context.Context, w http.ResponseWriter, req 
 	// Disable compression to avoid gzip decode issues
 	upstreamReq.Header.Set("Accept-Encoding", "identity")
 
-	// Override auth headers with provider's credentials
+	// Override auth headers with provider's credentials, or forward client's key
 	if a.provider.Config.Custom.APIKey != "" {
 		setAuthHeader(upstreamReq, targetType, a.provider.Config.Custom.APIKey)
+	} else if clientKey := extractClientAPIKey(originalHeaders); clientKey != "" {
+		setAuthHeader(upstreamReq, targetType, clientKey)
 	}
 
 	// Capture request info for attempt record
@@ -475,6 +477,21 @@ var geminiModelPathPattern = regexp.MustCompile(`(/v1(?:beta|internal)?/models/)
 // e.g., /v1beta/models/gemini-2.5-flash:generateContent -> /v1beta/models/gemini-2.5-pro:generateContent
 func updateGeminiModelInPath(path string, newModel string) string {
 	return geminiModelPathPattern.ReplaceAllString(path, "${1}"+newModel+"${3}")
+}
+
+// extractClientAPIKey extracts the API key from client request headers.
+// Supports Claude (x-api-key) and OpenAI (Authorization: Bearer) formats.
+func extractClientAPIKey(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	if key := headers.Get("X-Api-Key"); key != "" {
+		return key
+	}
+	if auth := headers.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimPrefix(auth, "Bearer ")
+	}
+	return ""
 }
 
 func setAuthHeader(req *http.Request, clientType domain.ClientType, apiKey string) {
