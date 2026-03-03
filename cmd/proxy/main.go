@@ -141,13 +141,13 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if peek.Stream {
-		handleStream(w, resp)
+		handleStream(w, resp, openaiBody)
 	} else {
-		handleNonStream(w, resp)
+		handleNonStream(w, resp, openaiBody)
 	}
 }
 
-func handleNonStream(w http.ResponseWriter, resp *http.Response) {
+func handleNonStream(w http.ResponseWriter, resp *http.Response, openaiBody []byte) {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		writeClaudeError(w, http.StatusBadGateway, "upstream_read_error", err.Error())
@@ -157,6 +157,10 @@ func handleNonStream(w http.ResponseWriter, resp *http.Response) {
 	log.Printf("<< OpenAI response: %d (%d bytes)", resp.StatusCode, len(respBody))
 
 	if resp.StatusCode != http.StatusOK {
+		log.Printf("<< OpenAI error body: %s", string(respBody))
+		if resp.StatusCode == 400 {
+			log.Printf(">> Request body that caused 400:\n%s", string(openaiBody))
+		}
 		writeClaudeError(w, resp.StatusCode, "upstream_error", string(respBody))
 		return
 	}
@@ -176,10 +180,14 @@ func handleNonStream(w http.ResponseWriter, resp *http.Response) {
 	w.Write(claudeBody)
 }
 
-func handleStream(w http.ResponseWriter, resp *http.Response) {
+func handleStream(w http.ResponseWriter, resp *http.Response, openaiBody []byte) {
 	if resp.StatusCode != http.StatusOK {
 		// Non-200 in stream mode — read full body and return error
 		respBody, _ := io.ReadAll(resp.Body)
+		log.Printf("<< OpenAI stream error: %d: %s", resp.StatusCode, string(respBody))
+		if resp.StatusCode == 400 {
+			log.Printf(">> Request body that caused 400:\n%s", string(openaiBody))
+		}
 		writeClaudeError(w, resp.StatusCode, "upstream_error", string(respBody))
 		return
 	}
