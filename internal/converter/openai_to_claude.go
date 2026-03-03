@@ -191,6 +191,30 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 	return json.Marshal(claudeResp)
 }
 
+// nextBlockIndex returns the next available content block index
+func nextBlockIndex(state *TransformState) int {
+	idx := 0
+	if state.ThinkingSent {
+		idx++
+	}
+	if state.ContentSent {
+		idx++
+	}
+	// Add tool call block count
+	for range state.ToolCalls {
+		idx++
+	}
+	return idx
+}
+
+// textBlockIndex returns the index used for the text content block
+func textBlockIndex(state *TransformState) int {
+	if state.ThinkingSent {
+		return 1
+	}
+	return 0
+}
+
 func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformState) ([]byte, error) {
 	events, remaining := ParseSSE(state.Buffer + string(chunk))
 	state.Buffer = remaining
@@ -200,6 +224,7 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 		if event.Event == "done" {
 			// Send message_stop
 			output = append(output, FormatSSE("message_stop", map[string]string{"type": "message_stop"})...)
+			state.StopReason = "done" // Mark that we sent message_stop
 			continue
 		}
 
@@ -209,6 +234,11 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 		}
 
 		if len(openaiChunk.Choices) == 0 {
+			// Some APIs send usage in a separate chunk with no choices
+			if openaiChunk.Usage != nil {
+				state.Usage.InputTokens = openaiChunk.Usage.PromptTokens
+				state.Usage.OutputTokens = openaiChunk.Usage.CompletionTokens
+			}
 			continue
 		}
 
@@ -223,11 +253,6 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 		if state.MessageID == "" {
 			state.MessageID = openaiChunk.ID
 
-			hasThinking := choice.Delta != nil && choice.Delta.ReasoningContent != ""
-			hasContent := choice.Delta != nil && choice.Delta.Content != nil
-			state.HasThinking = hasThinking
-			state.HasContent = hasContent
-
 			msgStart := map[string]interface{}{
 				"type": "message_start",
 				"message": map[string]interface{}{
@@ -239,61 +264,21 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 				},
 			}
 			output = append(output, FormatSSE("message_start", msgStart)...)
-
-			// Determine which blocks we need
-			if hasThinking && !hasContent {
-				// Only thinking - send thinking block start
-				blockStart := map[string]interface{}{
-					"type":  "content_block_start",
-					"index": 0,
-					"content_block": map[string]interface{}{
-						"type": "thinking",
-						"thinking": "",
-					},
-				}
-				output = append(output, FormatSSE("content_block_start", blockStart)...)
-				state.ThinkingSent = true
-			} else if hasContent && !hasThinking {
-				// Only text - send text block start
-				blockStart := map[string]interface{}{
-					"type":  "content_block_start",
-					"index": 0,
-					"content_block": map[string]interface{}{
-						"type": "text",
-						"text": "",
-					},
-				}
-				output = append(output, FormatSSE("content_block_start", blockStart)...)
-				state.ContentSent = true
-			} else if hasThinking && hasContent {
-				// Both thinking and text - send thinking block first
-				blockStart := map[string]interface{}{
-					"type":  "content_block_start",
-					"index": 0,
-					"content_block": map[string]interface{}{
-						"type": "thinking",
-						"thinking": "",
-					},
-				}
-				output = append(output, FormatSSE("content_block_start", blockStart)...)
-				state.ThinkingSent = true
-			}
 		}
 
 		if choice.Delta != nil {
 			// Reasoning content (GLM/DeepSeek thinking)
 			if choice.Delta.ReasoningContent != "" {
 				if !state.ThinkingSent {
-					// Start thinking block if not started
-					thinkingStart := map[string]interface{}{
+					blockStart := map[string]interface{}{
 						"type":  "content_block_start",
 						"index": 0,
 						"content_block": map[string]interface{}{
-							"type": "thinking",
+							"type":     "thinking",
 							"thinking": "",
 						},
 					}
-					output = append(output, FormatSSE("content_block_start", thinkingStart)...)
+					output = append(output, FormatSSE("content_block_start", blockStart)...)
 					state.ThinkingSent = true
 				}
 
@@ -301,8 +286,8 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 					"type":  "content_block_delta",
 					"index": 0,
 					"delta": map[string]interface{}{
-						"type":       "thinking_delta",
-						"thinking":   choice.Delta.ReasoningContent,
+						"type":     "thinking_delta",
+						"thinking": choice.Delta.ReasoningContent,
 					},
 				}
 				output = append(output, FormatSSE("content_block_delta", thinkingDelta)...)
@@ -310,17 +295,12 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 
 			// Text content
 			if content, ok := choice.Delta.Content.(string); ok && content != "" {
-				// Determine text index: if both thinking and text, text is index 1, else 0
-				textIndex := 0
-				if state.HasThinking && state.HasContent {
-					textIndex = 1
-				}
+				textIdx := textBlockIndex(state)
 
 				if !state.ContentSent {
-					// Start text block if not started
 					blockStart := map[string]interface{}{
 						"type":  "content_block_start",
-						"index": textIndex,
+						"index": textIdx,
 						"content_block": map[string]interface{}{
 							"type": "text",
 							"text": "",
@@ -332,7 +312,7 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 
 				delta := map[string]interface{}{
 					"type":  "content_block_delta",
-					"index": textIndex,
+					"index": textIdx,
 					"delta": map[string]interface{}{
 						"type": "text_delta",
 						"text": content,
@@ -340,30 +320,92 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 				}
 				output = append(output, FormatSSE("content_block_delta", delta)...)
 			}
+
+			// Tool calls streaming
+			if len(choice.Delta.ToolCalls) > 0 {
+				for _, tc := range choice.Delta.ToolCalls {
+					tcIdx := tc.Index
+
+					if _, exists := state.ToolCalls[tcIdx]; !exists {
+						// New tool call - close thinking/text blocks first if needed
+						if state.ThinkingSent && !state.ThinkingStopped {
+							output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
+								"type": "content_block_stop", "index": 0,
+							})...)
+							state.ThinkingStopped = true
+						}
+						if state.ContentSent && !state.ContentStopped {
+							output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
+								"type": "content_block_stop", "index": textBlockIndex(state),
+							})...)
+							state.ContentStopped = true
+						}
+
+						// Determine block index for this tool_use
+						blockIdx := nextBlockIndex(state)
+
+						state.ToolCalls[tcIdx] = &ToolCallState{
+							ID:        tc.ID,
+							Name:      tc.Function.Name,
+							BlockIndex: blockIdx,
+						}
+
+						// Send content_block_start for tool_use
+						blockStart := map[string]interface{}{
+							"type":  "content_block_start",
+							"index": blockIdx,
+							"content_block": map[string]interface{}{
+								"type": "tool_use",
+								"id":   tc.ID,
+								"name": tc.Function.Name,
+								"input": map[string]interface{}{},
+							},
+						}
+						output = append(output, FormatSSE("content_block_start", blockStart)...)
+					}
+
+					// Accumulate arguments and send delta
+					if tc.Function.Arguments != "" {
+						tcState := state.ToolCalls[tcIdx]
+						tcState.Arguments += tc.Function.Arguments
+
+						delta := map[string]interface{}{
+							"type":  "content_block_delta",
+							"index": tcState.BlockIndex,
+							"delta": map[string]interface{}{
+								"type":         "input_json_delta",
+								"partial_json": tc.Function.Arguments,
+							},
+						}
+						output = append(output, FormatSSE("content_block_delta", delta)...)
+					}
+				}
+			}
 		}
 
 		// Finish reason
 		if choice.FinishReason != "" {
-			// Stop thinking block if it was sent
-			if state.ThinkingSent {
-				thinkingStop := map[string]interface{}{
-					"type":  "content_block_stop",
-					"index": 0,
-				}
-				output = append(output, FormatSSE("content_block_stop", thinkingStop)...)
+			// Close thinking block if open
+			if state.ThinkingSent && !state.ThinkingStopped {
+				output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
+					"type": "content_block_stop", "index": 0,
+				})...)
+				state.ThinkingStopped = true
 			}
 
-			// Stop text block if it was sent
-			if state.ContentSent {
-				textIndex := 0
-				if state.HasThinking && state.HasContent {
-					textIndex = 1
-				}
-				blockStop := map[string]interface{}{
-					"type":  "content_block_stop",
-					"index": textIndex,
-				}
-				output = append(output, FormatSSE("content_block_stop", blockStop)...)
+			// Close text block if open
+			if state.ContentSent && !state.ContentStopped {
+				output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
+					"type": "content_block_stop", "index": textBlockIndex(state),
+				})...)
+				state.ContentStopped = true
+			}
+
+			// Close all tool_use blocks
+			for _, tc := range state.ToolCalls {
+				output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
+					"type": "content_block_stop", "index": tc.BlockIndex,
+				})...)
 			}
 
 			// Map finish reason
@@ -375,7 +417,7 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 				stopReason = "tool_use"
 			}
 
-			// Send message_delta
+			// Send message_delta with stop reason
 			msgDelta := map[string]interface{}{
 				"type": "message_delta",
 				"delta": map[string]interface{}{

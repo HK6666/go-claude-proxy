@@ -20,13 +20,16 @@ type TransformState struct {
 	HasContent       bool
 	ThinkingSent     bool
 	ContentSent      bool
+	ThinkingStopped  bool // thinking block has been closed
+	ContentStopped   bool // text block has been closed
 }
 
 // ToolCallState tracks tool call conversion state
 type ToolCallState struct {
-	ID        string
-	Name      string
-	Arguments string
+	ID         string
+	Name       string
+	Arguments  string
+	BlockIndex int // content block index in Claude response
 }
 
 // Usage tracks token usage during streaming
