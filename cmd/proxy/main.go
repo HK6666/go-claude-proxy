@@ -123,6 +123,17 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		// Continue anyway - this is not critical
 	}
 
+	// Extract API key from client request, fallback to global key
+	apiKey := ""
+	if key := r.Header.Get("x-api-key"); key != "" {
+		apiKey = key // Claude format
+	} else if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		apiKey = strings.TrimPrefix(auth, "Bearer ") // OpenAI format
+	}
+	if apiKey == "" {
+		apiKey = glmAPIKey // Fallback to global key
+	}
+
 	// Build upstream request
 	upstreamURL := glmBaseURL + "/v1/chat/completions"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(openaiBody))
@@ -131,7 +142,7 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+glmAPIKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	// Forward request
 	resp, err := http.DefaultClient.Do(req)
