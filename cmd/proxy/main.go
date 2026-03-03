@@ -115,10 +115,12 @@ func handleMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Disable GLM thinking mode to simplify response handling
-	openaiBody, err = addThinkingDisabled(openaiBody)
+	// Disable GLM extended thinking (reasoning_content) to improve performance
+	// GLM's reasoning_content can be very large and slow down responses significantly
+	openaiBody, err = disableGLMThinking(openaiBody)
 	if err != nil {
-		log.Printf("failed to add thinking disabled: %v", err)
+		log.Printf("failed to disable GLM thinking: %v", err)
+		// Continue anyway - this is not critical
 	}
 
 	// Build upstream request
@@ -192,6 +194,9 @@ func handleStream(w http.ResponseWriter, resp *http.Response, openaiBody []byte)
 		return
 	}
 
+	// Log response headers for debugging
+	log.Printf("<< Stream response headers: content-type=%s", resp.Header.Get("Content-Type"))
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeClaudeError(w, http.StatusInternalServerError, "proxy_error", "streaming not supported")
@@ -204,10 +209,18 @@ func handleStream(w http.ResponseWriter, resp *http.Response, openaiBody []byte)
 
 	state := converter.NewTransformState()
 	buf := make([]byte, 32*1024)
+	chunkCount := 0
+	totalBytesRead := 0
+	totalBytesWritten := 0
 
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			totalBytesRead += n
+			chunkCount++
+			// Log every chunk to help debug
+			log.Printf("<< Stream chunk #%d, size=%d bytes", chunkCount, n)
+
 			// Pass raw SSE bytes directly to TransformChunk —
 			// it handles SSE parsing internally via ParseSSE + state.Buffer
 			claudeChunk, transformErr := registry.TransformStreamChunk(
@@ -219,13 +232,18 @@ func handleStream(w http.ResponseWriter, resp *http.Response, openaiBody []byte)
 				continue
 			}
 			if len(claudeChunk) > 0 {
+				totalBytesWritten += len(claudeChunk)
 				w.Write(claudeChunk)
 				flusher.Flush()
+			} else {
+				log.Printf("<< TransformStreamChunk returned empty data for chunk #%d", chunkCount)
 			}
 		}
 		if err != nil {
 			if err != io.EOF {
 				log.Printf("stream read error: %v", err)
+			} else {
+				log.Printf("<< Stream EOF: total chunks=%d, read=%d, written=%d", chunkCount, totalBytesRead, totalBytesWritten)
 			}
 			break
 		}
@@ -250,5 +268,21 @@ func addThinkingDisabled(body []byte) ([]byte, error) {
 		return nil, err
 	}
 	req["thinking"] = map[string]string{"type": "disabled"}
+	return json.Marshal(req)
+}
+
+func disableGLMThinking(body []byte) ([]byte, error) {
+	var req map[string]interface{}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, err
+	}
+	// Try to disable GLM's extended thinking (reasoning_content)
+	// Common parameter names for different APIs
+	req["include_reasoning"] = false
+	req["extended_thinking"] = false
+	// Also try to set max reasoning tokens to 0
+	if req["max_tokens"] == nil {
+		req["max_tokens"] = 4096
+	}
 	return json.Marshal(req)
 }

@@ -219,11 +219,12 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 		choice := resp.Choices[0]
 		if choice.Message != nil {
 			// Extract reasoning_content as thinking block (DeepSeek/GLM style)
+			// GLM's reasoning_content is treated as regular text to avoid blocking
 			if choice.Message.ReasoningContent != "" {
+				// Append reasoning content as text (not as thinking block)
 				claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
-					Type:      "thinking",
-					Thinking:  choice.Message.ReasoningContent,
-					Signature: fmt.Sprintf("%d", time.Now().UnixMilli()),
+					Type: "text",
+					Text: choice.Message.ReasoningContent,
 				})
 			}
 
@@ -384,29 +385,36 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 
 		if choice.Delta != nil {
 			// Reasoning content (GLM/DeepSeek thinking via reasoning_content field)
+			// GLM sends ONLY reasoning_content initially, then content later
+			// We must convert reasoning_content to regular text to avoid blocking
 			if choice.Delta.ReasoningContent != "" {
-				if !state.ThinkingSent {
+				// Treat reasoning_content as regular text, not thinking block
+				// This prevents the "stuck in thinking" issue
+				if !state.ContentSent {
+					// Start text block
+					textIdx := textBlockIndex(state)
 					blockStart := map[string]interface{}{
 						"type":  "content_block_start",
-						"index": 0,
+						"index": textIdx,
 						"content_block": map[string]interface{}{
-							"type":     "thinking",
-							"thinking": "",
+							"type": "text",
+							"text": "",
 						},
 					}
 					output = append(output, FormatSSE("content_block_start", blockStart)...)
-					state.ThinkingSent = true
+					state.ContentSent = true
 				}
 
-				thinkingDelta := map[string]interface{}{
+				// Send reasoning content as text delta
+				textDelta := map[string]interface{}{
 					"type":  "content_block_delta",
-					"index": 0,
+					"index": textBlockIndex(state),
 					"delta": map[string]interface{}{
-						"type":     "thinking_delta",
-						"thinking": choice.Delta.ReasoningContent,
+						"type": "text_delta",
+						"text": choice.Delta.ReasoningContent,
 					},
 				}
-				output = append(output, FormatSSE("content_block_delta", thinkingDelta)...)
+				output = append(output, FormatSSE("content_block_delta", textDelta)...)
 			}
 
 			// Text content - also handle <think> tags from open-source models

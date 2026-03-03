@@ -97,6 +97,7 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 							}
 						}
 						toolCalls = append(toolCalls, OpenAIToolCall{
+							Index: len(toolCalls), // Add index for GLM/ModelArts compatibility
 							ID:   id,
 							Type: "function",
 							Function: OpenAIFunctionCall{Name: name, Arguments: args},
@@ -201,15 +202,26 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 	// Drop orphaned tool messages and ensure no invalid sequences.
 	openaiReq.Messages = fixToolMessageOrdering(openaiReq.Messages)
 
+	// GLM/ModelArts API does NOT support "tool" message role in requests.
+	// Filter out all tool messages to avoid 400 errors.
+	var filteredMessages []OpenAIMessage
+	for _, msg := range openaiReq.Messages {
+		if msg.Role != "tool" {
+			filteredMessages = append(filteredMessages, msg)
+		}
+	}
+	openaiReq.Messages = filteredMessages
+
 	return json.Marshal(openaiReq)
 }
 
 // fixToolMessageOrdering validates and fixes message ordering for OpenAI compatibility.
-// OpenAI requires: tool messages MUST immediately follow the assistant message with matching tool_calls.
+// OpenAI requires: tool messages MUST immediately follow the assistant message with matching tool_calls,
+// AND tool messages must be in the SAME ORDER as the tool_calls array.
 // This function:
 // 1. Drops empty assistant messages (e.g., thinking-only blocks that were stripped)
-// 2. Collects tool_call IDs from each assistant message
-// 3. Ensures tool messages follow their corresponding assistant message
+// 2. Collects tool_call IDs from each assistant message in order
+// 3. Reorders tool messages to match tool_calls order
 // 4. Drops orphaned tool messages with no matching tool_call
 func fixToolMessageOrdering(messages []OpenAIMessage) []OpenAIMessage {
 	if len(messages) == 0 {
@@ -225,32 +237,76 @@ func fixToolMessageOrdering(messages []OpenAIMessage) []OpenAIMessage {
 		cleaned = append(cleaned, msg)
 	}
 
-	// Second pass: build a set of all valid tool_call IDs from assistant messages,
-	// and ensure each tool message follows its corresponding assistant.
-	// Strategy: collect all tool_call IDs, then validate tool messages are in correct position.
+	// Second pass: ensure tool messages are in the same order as tool_calls
 	var result []OpenAIMessage
-	// Track which tool_call IDs are "active" (the most recent assistant's tool_calls)
-	var activeToolCallIDs map[string]bool
+	var activeToolCallOrder []string  // Preserve order of tool_calls
+	var activeToolCalls map[string]*OpenAIMessage  // Map tool_call_id -> tool message
 
 	for _, msg := range cleaned {
 		if msg.Role == "assistant" {
-			// Update active tool_call IDs
-			activeToolCallIDs = make(map[string]bool)
-			for _, tc := range msg.ToolCalls {
-				activeToolCallIDs[tc.ID] = true
+			// First, flush any pending tool messages in order
+			for _, tcID := range activeToolCallOrder {
+				if toolMsg, ok := activeToolCalls[tcID]; ok {
+					result = append(result, *toolMsg)
+					delete(activeToolCalls, tcID)
+				}
 			}
+			// Clear state
+			activeToolCallOrder = nil
+			activeToolCalls = nil
+
+			// Collect tool_call IDs in order
+			if len(msg.ToolCalls) > 0 {
+				activeToolCallOrder = make([]string, 0, len(msg.ToolCalls))
+				activeToolCalls = make(map[string]*OpenAIMessage)
+				for _, tc := range msg.ToolCalls {
+					activeToolCallOrder = append(activeToolCallOrder, tc.ID)
+				}
+			}
+
+			// Add the assistant message
 			result = append(result, msg)
+
 		} else if msg.Role == "tool" {
-			// Validate: the tool message must match an active tool_call from the last assistant
-			if activeToolCallIDs != nil && activeToolCallIDs[msg.ToolCallID] {
+			// Collect tool messages to be reordered later
+			if activeToolCalls != nil && msg.ToolCallID != "" {
+				// Check if this tool_call_id is expected
+				expected := false
+				for _, tcID := range activeToolCallOrder {
+					if tcID == msg.ToolCallID {
+						expected = true
+						break
+					}
+				}
+				if expected {
+					// Store the tool message (will be added in order later)
+					msgCopy := msg
+					activeToolCalls[msg.ToolCallID] = &msgCopy
+				}
+				// else: orphaned tool message, drop it
+			} else {
+				// No active tool_calls, just append
 				result = append(result, msg)
-				delete(activeToolCallIDs, msg.ToolCallID) // Mark as consumed
 			}
-			// else: orphaned tool message, drop it
+
 		} else {
-			// user/system message - clear active tool calls
-			activeToolCallIDs = nil
+			// user/system message - first flush pending tool messages, then add this message
+			for _, tcID := range activeToolCallOrder {
+				if toolMsg, ok := activeToolCalls[tcID]; ok {
+					result = append(result, *toolMsg)
+					delete(activeToolCalls, tcID)
+				}
+			}
+			activeToolCallOrder = nil
+			activeToolCalls = nil
 			result = append(result, msg)
+		}
+	}
+
+	// Flush any remaining tool messages
+	for _, tcID := range activeToolCallOrder {
+		if toolMsg, ok := activeToolCalls[tcID]; ok {
+			result = append(result, *toolMsg)
 		}
 	}
 
@@ -298,6 +354,7 @@ func (c *claudeToOpenAIResponse) Transform(body []byte) ([]byte, error) {
 		case "tool_use":
 			inputJSON, _ := json.Marshal(block.Input)
 			toolCalls = append(toolCalls, OpenAIToolCall{
+				Index: len(toolCalls), // Add index for GLM/ModelArts compatibility
 				ID:   block.ID,
 				Type: "function",
 				Function: OpenAIFunctionCall{Name: block.Name, Arguments: string(inputJSON)},

@@ -27,3 +27,4 @@ dist/
 
 # Go specific
 vendor/
+.claude/settings.local.json
