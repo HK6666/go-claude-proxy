@@ -72,6 +72,19 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 						if text, ok := m["text"].(string); ok {
 							parts = append(parts, OpenAIContentPart{Type: "text", Text: text})
 						}
+					case "image":
+						if source, ok := m["source"].(map[string]interface{}); ok {
+							mediaType, _ := source["media_type"].(string)
+							data, _ := source["data"].(string)
+							if mediaType != "" && data != "" {
+								parts = append(parts, OpenAIContentPart{
+									Type: "image_url",
+									ImageURL: &OpenAIImageURL{
+										URL: "data:" + mediaType + ";base64," + data,
+									},
+								})
+							}
+						}
 					case "tool_use":
 						id, _ := m["id"].(string)
 						name, _ := m["name"].(string)
@@ -146,6 +159,30 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 	// Convert stop sequences
 	if len(req.StopSequences) > 0 {
 		openaiReq.Stop = req.StopSequences
+	}
+
+	// Convert tool_choice
+	if req.ToolChoice != nil {
+		switch tc := req.ToolChoice.(type) {
+		case string:
+			switch tc {
+			case "any":
+				openaiReq.ToolChoice = "required"
+			case "auto":
+				openaiReq.ToolChoice = "auto"
+			case "none":
+				openaiReq.ToolChoice = "none"
+			}
+		case map[string]interface{}:
+			if tcType, _ := tc["type"].(string); tcType == "tool" {
+				if name, _ := tc["name"].(string); name != "" {
+					openaiReq.ToolChoice = map[string]interface{}{
+						"type":     "function",
+						"function": map[string]string{"name": name},
+					}
+				}
+			}
+		}
 	}
 
 	return json.Marshal(openaiReq)

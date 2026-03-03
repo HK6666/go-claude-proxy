@@ -2,6 +2,9 @@ package converter
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/Bowl42/maxx-next/internal/domain"
 )
@@ -80,6 +83,34 @@ func (c *openaiToClaudeRequest) Transform(body []byte, model string, stream bool
 					case "text":
 						text, _ := m["text"].(string)
 						blocks = append(blocks, ClaudeContentBlock{Type: "text", Text: text})
+					case "image_url":
+						if imgURL, ok := m["image_url"].(map[string]interface{}); ok {
+							url, _ := imgURL["url"].(string)
+							if strings.HasPrefix(url, "data:") {
+								// Parse data URI: data:image/png;base64,xxxxx
+								if semiIdx := strings.Index(url, ";base64,"); semiIdx != -1 {
+									mediaType := url[5:semiIdx] // skip "data:"
+									data := url[semiIdx+8:]     // skip ";base64,"
+									blocks = append(blocks, ClaudeContentBlock{
+										Type: "image",
+										Source: &ClaudeImageSource{
+											Type:      "base64",
+											MediaType: mediaType,
+											Data:      data,
+										},
+									})
+								}
+							} else if url != "" {
+								// URL-based image - pass as url source type
+								blocks = append(blocks, ClaudeContentBlock{
+									Type: "image",
+									Source: &ClaudeImageSource{
+										Type: "url",
+										URL:  url,
+									},
+								})
+							}
+						}
 					}
 				}
 			}
@@ -121,6 +152,32 @@ func (c *openaiToClaudeRequest) Transform(body []byte, model string, stream bool
 		})
 	}
 
+	// Convert tool_choice
+	if req.ToolChoice != nil {
+		switch tc := req.ToolChoice.(type) {
+		case string:
+			switch tc {
+			case "required":
+				claudeReq.ToolChoice = map[string]interface{}{"type": "any"}
+			case "auto":
+				claudeReq.ToolChoice = map[string]interface{}{"type": "auto"}
+			case "none":
+				// Claude doesn't have "none" - just don't set tool_choice
+			}
+		case map[string]interface{}:
+			if tcType, _ := tc["type"].(string); tcType == "function" {
+				if fn, ok := tc["function"].(map[string]interface{}); ok {
+					if name, _ := fn["name"].(string); name != "" {
+						claudeReq.ToolChoice = map[string]interface{}{
+							"type": "tool",
+							"name": name,
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Convert stop
 	switch stop := req.Stop.(type) {
 	case string:
@@ -156,12 +213,33 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		if choice.Message != nil {
+			// Extract reasoning_content as thinking block (DeepSeek/GLM style)
+			if choice.Message.ReasoningContent != "" {
+				claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
+					Type:      "thinking",
+					Thinking:  choice.Message.ReasoningContent,
+					Signature: fmt.Sprintf("%d", time.Now().UnixMilli()),
+				})
+			}
+
 			// Convert content
 			if content, ok := choice.Message.Content.(string); ok && content != "" {
-				claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
-					Type: "text",
-					Text: content,
-				})
+				// Extract <think> tags from content (open-source model convention)
+				textContent := content
+				if thinkContent, remaining, found := extractThinkTags(content); found {
+					claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
+						Type:      "thinking",
+						Thinking:  thinkContent,
+						Signature: fmt.Sprintf("%d", time.Now().UnixMilli()),
+					})
+					textContent = strings.TrimSpace(remaining)
+				}
+				if textContent != "" {
+					claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
+						Type: "text",
+						Text: textContent,
+					})
+				}
 			}
 
 			// Convert tool calls
@@ -182,13 +260,41 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 				claudeResp.StopReason = "end_turn"
 			case "length":
 				claudeResp.StopReason = "max_tokens"
-			case "tool_calls":
+			case "tool_calls", "function_call":
 				claudeResp.StopReason = "tool_use"
 			}
 		}
 	}
 
+	// Ensure at least one content block
+	if len(claudeResp.Content) == 0 {
+		claudeResp.Content = []ClaudeContentBlock{{Type: "text", Text: ""}}
+	}
+
 	return json.Marshal(claudeResp)
+}
+
+// extractThinkTags extracts content from <think>...</think> or <thinking>...</thinking> tags
+func extractThinkTags(content string) (thinking string, remaining string, found bool) {
+	for _, tag := range []string{"think", "thinking"} {
+		openTag := "<" + tag + ">"
+		closeTag := "</" + tag + ">"
+		startIdx := strings.Index(content, openTag)
+		if startIdx == -1 {
+			continue
+		}
+		endIdx := strings.Index(content, closeTag)
+		if endIdx == -1 {
+			// Unclosed tag - treat everything after open tag as thinking
+			thinking = strings.TrimSpace(content[startIdx+len(openTag):])
+			remaining = strings.TrimSpace(content[:startIdx])
+			return thinking, remaining, true
+		}
+		thinking = strings.TrimSpace(content[startIdx+len(openTag) : endIdx])
+		remaining = strings.TrimSpace(content[:startIdx] + content[endIdx+len(closeTag):])
+		return thinking, remaining, true
+	}
+	return "", content, false
 }
 
 // nextBlockIndex returns the next available content block index
@@ -267,7 +373,7 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 		}
 
 		if choice.Delta != nil {
-			// Reasoning content (GLM/DeepSeek thinking)
+			// Reasoning content (GLM/DeepSeek thinking via reasoning_content field)
 			if choice.Delta.ReasoningContent != "" {
 				if !state.ThinkingSent {
 					blockStart := map[string]interface{}{
@@ -293,32 +399,35 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 				output = append(output, FormatSSE("content_block_delta", thinkingDelta)...)
 			}
 
-			// Text content
+			// Text content - also handle <think> tags from open-source models
 			if content, ok := choice.Delta.Content.(string); ok && content != "" {
-				textIdx := textBlockIndex(state)
+				content = handleStreamingThinkTags(content, state, &output)
+				if content != "" {
+					textIdx := textBlockIndex(state)
 
-				if !state.ContentSent {
-					blockStart := map[string]interface{}{
-						"type":  "content_block_start",
+					if !state.ContentSent {
+						blockStart := map[string]interface{}{
+							"type":  "content_block_start",
+							"index": textIdx,
+							"content_block": map[string]interface{}{
+								"type": "text",
+								"text": "",
+							},
+						}
+						output = append(output, FormatSSE("content_block_start", blockStart)...)
+						state.ContentSent = true
+					}
+
+					delta := map[string]interface{}{
+						"type":  "content_block_delta",
 						"index": textIdx,
-						"content_block": map[string]interface{}{
-							"type": "text",
-							"text": "",
+						"delta": map[string]interface{}{
+							"type": "text_delta",
+							"text": content,
 						},
 					}
-					output = append(output, FormatSSE("content_block_start", blockStart)...)
-					state.ContentSent = true
+					output = append(output, FormatSSE("content_block_delta", delta)...)
 				}
-
-				delta := map[string]interface{}{
-					"type":  "content_block_delta",
-					"index": textIdx,
-					"delta": map[string]interface{}{
-						"type": "text_delta",
-						"text": content,
-					},
-				}
-				output = append(output, FormatSSE("content_block_delta", delta)...)
 			}
 
 			// Tool calls streaming
@@ -329,6 +438,15 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 					if _, exists := state.ToolCalls[tcIdx]; !exists {
 						// New tool call - close thinking/text blocks first if needed
 						if state.ThinkingSent && !state.ThinkingStopped {
+							sigDelta := map[string]interface{}{
+								"type":  "content_block_delta",
+								"index": 0,
+								"delta": map[string]interface{}{
+									"type":      "signature_delta",
+									"signature": fmt.Sprintf("%d", time.Now().UnixMilli()),
+								},
+							}
+							output = append(output, FormatSSE("content_block_delta", sigDelta)...)
 							output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
 								"type": "content_block_stop", "index": 0,
 							})...)
@@ -385,8 +503,17 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 
 		// Finish reason
 		if choice.FinishReason != "" {
-			// Close thinking block if open
+			// Close thinking block if open - send signature_delta first
 			if state.ThinkingSent && !state.ThinkingStopped {
+				sigDelta := map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]interface{}{
+						"type":      "signature_delta",
+						"signature": fmt.Sprintf("%d", time.Now().UnixMilli()),
+					},
+				}
+				output = append(output, FormatSSE("content_block_delta", sigDelta)...)
 				output = append(output, FormatSSE("content_block_stop", map[string]interface{}{
 					"type": "content_block_stop", "index": 0,
 				})...)
@@ -413,7 +540,7 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 			switch choice.FinishReason {
 			case "length":
 				stopReason = "max_tokens"
-			case "tool_calls":
+			case "tool_calls", "function_call":
 				stopReason = "tool_use"
 			}
 
@@ -430,4 +557,87 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 	}
 
 	return output, nil
+}
+
+// handleStreamingThinkTags detects and handles <think>/<thinking> tags in streaming content.
+// Returns the remaining text content after stripping think tags.
+func handleStreamingThinkTags(content string, state *TransformState, output *[]byte) string {
+	// Already exited think mode - pass through
+	if state.ThinkTagMode == 2 {
+		return content
+	}
+
+	// Check if we're entering think mode
+	if state.ThinkTagMode == 0 {
+		// Check for opening tags
+		for _, tag := range []string{"<think>", "<thinking>"} {
+			idx := strings.Index(content, tag)
+			if idx != -1 {
+				state.ThinkTagMode = 1
+				// Text before the tag is regular content
+				before := content[:idx]
+				after := content[idx+len(tag):]
+
+				// Start thinking block
+				if !state.ThinkingSent {
+					blockStart := map[string]interface{}{
+						"type":  "content_block_start",
+						"index": 0,
+						"content_block": map[string]interface{}{
+							"type":     "thinking",
+							"thinking": "",
+						},
+					}
+					*output = append(*output, FormatSSE("content_block_start", blockStart)...)
+					state.ThinkingSent = true
+				}
+
+				// Check if closing tag is in the same chunk
+				remaining := handleStreamingThinkTags(after, state, output)
+				if before != "" {
+					return before + remaining
+				}
+				return remaining
+			}
+		}
+		// No tag found - regular content
+		return content
+	}
+
+	// Inside think mode (ThinkTagMode == 1) - look for closing tag
+	for _, tag := range []string{"</think>", "</thinking>"} {
+		idx := strings.Index(content, tag)
+		if idx != -1 {
+			// Found closing tag
+			thinkContent := content[:idx]
+			if thinkContent != "" {
+				thinkingDelta := map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": 0,
+					"delta": map[string]interface{}{
+						"type":     "thinking_delta",
+						"thinking": thinkContent,
+					},
+				}
+				*output = append(*output, FormatSSE("content_block_delta", thinkingDelta)...)
+			}
+			state.ThinkTagMode = 2 // Exited think mode
+			remaining := strings.TrimSpace(content[idx+len(tag):])
+			return remaining
+		}
+	}
+
+	// Still inside think tags - emit as thinking delta
+	if content != "" {
+		thinkingDelta := map[string]interface{}{
+			"type":  "content_block_delta",
+			"index": 0,
+			"delta": map[string]interface{}{
+				"type":     "thinking_delta",
+				"thinking": content,
+			},
+		}
+		*output = append(*output, FormatSSE("content_block_delta", thinkingDelta)...)
+	}
+	return "" // All content consumed as thinking
 }

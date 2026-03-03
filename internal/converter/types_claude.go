@@ -56,9 +56,10 @@ type ClaudeContentBlock struct {
 
 // ClaudeImageSource represents image source in Claude API
 type ClaudeImageSource struct {
-	Type      string `json:"type"`       // "base64"
-	MediaType string `json:"media_type"` // e.g. "image/png"
-	Data      string `json:"data"`       // base64 data
+	Type      string `json:"type"`                 // "base64" or "url"
+	MediaType string `json:"media_type,omitempty"` // e.g. "image/png" (for base64)
+	Data      string `json:"data,omitempty"`       // base64 data (for base64 type)
+	URL       string `json:"url,omitempty"`        // URL (for url type)
 }
 
 type ClaudeTool struct {

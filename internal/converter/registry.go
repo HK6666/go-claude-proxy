@@ -22,6 +22,8 @@ type TransformState struct {
 	ContentSent      bool
 	ThinkingStopped  bool // thinking block has been closed
 	ContentStopped   bool // text block has been closed
+	ThinkTagMode     int  // 0=not detected, 1=inside <think> tag, 2=exited <think> tag
+	ThinkTagBuffer   string // buffer for partial tag detection
 }
 
 // ToolCallState tracks tool call conversion state
