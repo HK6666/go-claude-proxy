@@ -2,6 +2,8 @@ package converter
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Bowl42/maxx-next/internal/domain"
@@ -202,15 +204,14 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 	// Drop orphaned tool messages and ensure no invalid sequences.
 	openaiReq.Messages = fixToolMessageOrdering(openaiReq.Messages)
 
-	// GLM/ModelArts API does NOT support "tool" message role in requests.
-	// Filter out all tool messages to avoid 400 errors.
-	var filteredMessages []OpenAIMessage
-	for _, msg := range openaiReq.Messages {
-		if msg.Role != "tool" {
-			filteredMessages = append(filteredMessages, msg)
-		}
-	}
-	openaiReq.Messages = filteredMessages
+	// GLM/ModelArts API does NOT support "tool" message role.
+	// Convert tool-calling history into plain text so GLM understands the context:
+	// - assistant with tool_calls → text description of what was called
+	// - tool results → user message with the result
+	openaiReq.Messages = flattenToolMessages(openaiReq.Messages)
+
+	// Also strip tools definition if GLM doesn't support it
+	// (keep it for now — only flatten the history messages)
 
 	return json.Marshal(openaiReq)
 }
@@ -311,6 +312,69 @@ func fixToolMessageOrdering(messages []OpenAIMessage) []OpenAIMessage {
 	}
 
 	return result
+}
+
+// flattenToolMessages converts tool-calling messages into plain text for APIs
+// that don't support the "tool" role (like GLM/ModelArts).
+// - assistant messages with tool_calls → keeps text content, appends tool call descriptions
+// - tool messages → converted to user messages with tool result text
+// This preserves conversation context so the model understands what happened.
+func flattenToolMessages(messages []OpenAIMessage) []OpenAIMessage {
+	var result []OpenAIMessage
+
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			// Convert tool_calls to text description
+			text, _ := msg.Content.(string)
+			for _, tc := range msg.ToolCalls {
+				text += fmt.Sprintf("\n[Called tool: %s(%s)]", tc.Function.Name, tc.Function.Arguments)
+			}
+			result = append(result, OpenAIMessage{
+				Role:    "assistant",
+				Content: strings.TrimSpace(text),
+			})
+		} else if msg.Role == "tool" {
+			// Convert tool result to user message
+			content, _ := msg.Content.(string)
+			if content == "" {
+				content = "(empty result)"
+			}
+			// Merge consecutive tool results into one user message
+			toolText := fmt.Sprintf("[Tool result for %s]: %s", msg.ToolCallID, content)
+			for i+1 < len(messages) && messages[i+1].Role == "tool" {
+				i++
+				nextContent, _ := messages[i].Content.(string)
+				if nextContent == "" {
+					nextContent = "(empty result)"
+				}
+				toolText += fmt.Sprintf("\n[Tool result for %s]: %s", messages[i].ToolCallID, nextContent)
+			}
+			result = append(result, OpenAIMessage{
+				Role:    "user",
+				Content: toolText,
+			})
+		} else {
+			result = append(result, msg)
+		}
+	}
+
+	// Fix consecutive same-role messages by merging them
+	var merged []OpenAIMessage
+	for _, msg := range result {
+		if len(merged) > 0 && merged[len(merged)-1].Role == msg.Role {
+			// Merge with previous message
+			prev := &merged[len(merged)-1]
+			prevText, _ := prev.Content.(string)
+			currText, _ := msg.Content.(string)
+			prev.Content = prevText + "\n" + currText
+		} else {
+			merged = append(merged, msg)
+		}
+	}
+
+	return merged
 }
 
 // isEmptyContent checks if message content is effectively empty
