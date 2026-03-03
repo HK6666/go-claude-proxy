@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -98,9 +99,9 @@ func (a *CustomAdapter) Execute(ctx context.Context, w http.ResponseWriter, req 
 		return domain.NewProxyErrorWithMessage(domain.ErrUpstreamError, true, "failed to create upstream request")
 	}
 
-	// Forward original headers (filtered) - preserves anthropic-version, anthropic-beta, user-agent, etc.
+	// Forward original headers (filtered)
 	originalHeaders := ctxutil.GetRequestHeaders(ctx)
-	copyHeadersFiltered(upstreamReq.Header, originalHeaders)
+	copyHeadersFiltered(upstreamReq.Header, originalHeaders, targetType)
 
 	// Set content-type if not already set
 	if upstreamReq.Header.Get("Content-Type") == "" {
@@ -137,6 +138,7 @@ func (a *CustomAdapter) Execute(ctx context.Context, w http.ResponseWriter, req 
 	// Check for error response
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
+		log.Printf("[Upstream] %d error from %s: %s", resp.StatusCode, upstreamURL, string(body))
 		// Capture error response info
 		if attempt := ctxutil.GetUpstreamAttempt(ctx); attempt != nil {
 			attempt.ResponseInfo = &domain.ResponseInfo{
@@ -573,14 +575,26 @@ var filteredHeaders = map[string]bool{
 	"x-api-key":     true, // Will be replaced with provider's key
 }
 
+// Headers specific to each API format - should not be forwarded to other formats
+var anthropicHeaders = map[string]bool{
+	"anthropic-version": true,
+	"anthropic-beta":    true,
+	"anthropic-dangerous-direct-browser-access": true,
+}
+
 // copyHeadersFiltered copies headers from src to dst, filtering out sensitive headers
-func copyHeadersFiltered(dst, src http.Header) {
+// and API-format-specific headers that don't belong to the target format
+func copyHeadersFiltered(dst, src http.Header, targetType domain.ClientType) {
 	if src == nil {
 		return
 	}
 	for key, values := range src {
 		lowerKey := strings.ToLower(key)
 		if filteredHeaders[lowerKey] {
+			continue
+		}
+		// Don't forward Anthropic-specific headers to non-Claude targets
+		if targetType != domain.ClientTypeClaude && anthropicHeaders[lowerKey] {
 			continue
 		}
 		for _, v := range values {

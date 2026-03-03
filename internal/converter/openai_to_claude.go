@@ -129,7 +129,12 @@ func (c *openaiToClaudeRequest) Transform(body []byte, model string, stream bool
 			}
 			for _, tc := range msg.ToolCalls {
 				var input interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				if tc.Function.Arguments != "" {
+					json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				}
+				if input == nil {
+					input = map[string]interface{}{}
+				}
 				blocks = append(blocks, ClaudeContentBlock{
 					Type:  "tool_use",
 					ID:    tc.ID,
@@ -245,7 +250,12 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 			// Convert tool calls
 			for _, tc := range choice.Message.ToolCalls {
 				var input interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				if tc.Function.Arguments != "" {
+					json.Unmarshal([]byte(tc.Function.Arguments), &input)
+				}
+				if input == nil {
+					input = map[string]interface{}{}
+				}
 				claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
 					Type:  "tool_use",
 					ID:    tc.ID,

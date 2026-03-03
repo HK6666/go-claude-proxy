@@ -88,12 +88,18 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 					case "tool_use":
 						id, _ := m["id"].(string)
 						name, _ := m["name"].(string)
-						input, _ := m["input"]
-						inputJSON, _ := json.Marshal(input)
+						input := m["input"]
+						// Ensure arguments is a valid JSON object, never "null"
+						args := "{}"
+						if input != nil {
+							if inputJSON, err := json.Marshal(input); err == nil && string(inputJSON) != "null" {
+								args = string(inputJSON)
+							}
+						}
 						toolCalls = append(toolCalls, OpenAIToolCall{
 							ID:   id,
 							Type: "function",
-							Function: OpenAIFunctionCall{Name: name, Arguments: string(inputJSON)},
+							Function: OpenAIFunctionCall{Name: name, Arguments: args},
 						})
 					case "tool_result":
 						toolUseID, _ := m["tool_use_id"].(string)
@@ -121,6 +127,11 @@ func (c *claudeToOpenAIRequest) Transform(body []byte, model string, stream bool
 			}
 			if len(toolCalls) > 0 {
 				openaiMsg.ToolCalls = toolCalls
+				// OpenAI requires content to be non-null on assistant messages with tool_calls
+				// Some compatible APIs reject content: null
+				if openaiMsg.Content == nil {
+					openaiMsg.Content = ""
+				}
 			}
 			if len(parts) == 1 && parts[0].Type == "text" {
 				openaiMsg.Content = parts[0].Text
