@@ -218,15 +218,8 @@ func (c *openaiToClaudeResponse) Transform(body []byte) ([]byte, error) {
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]
 		if choice.Message != nil {
-			// Extract reasoning_content as thinking block (DeepSeek/GLM style)
-			// GLM's reasoning_content is treated as regular text to avoid blocking
-			if choice.Message.ReasoningContent != "" {
-				// Append reasoning content as text (not as thinking block)
-				claudeResp.Content = append(claudeResp.Content, ClaudeContentBlock{
-					Type: "text",
-					Text: choice.Message.ReasoningContent,
-				})
-			}
+			// Skip reasoning_content (GLM/DeepSeek thinking) - discard it entirely.
+			// Only the actual content matters for the response.
 
 			// Convert content
 			if content, ok := choice.Message.Content.(string); ok && content != "" {
@@ -385,37 +378,9 @@ func (c *openaiToClaudeResponse) TransformChunk(chunk []byte, state *TransformSt
 
 		if choice.Delta != nil {
 			// Reasoning content (GLM/DeepSeek thinking via reasoning_content field)
-			// GLM sends ONLY reasoning_content initially, then content later
-			// We must convert reasoning_content to regular text to avoid blocking
-			if choice.Delta.ReasoningContent != "" {
-				// Treat reasoning_content as regular text, not thinking block
-				// This prevents the "stuck in thinking" issue
-				if !state.ContentSent {
-					// Start text block
-					textIdx := textBlockIndex(state)
-					blockStart := map[string]interface{}{
-						"type":  "content_block_start",
-						"index": textIdx,
-						"content_block": map[string]interface{}{
-							"type": "text",
-							"text": "",
-						},
-					}
-					output = append(output, FormatSSE("content_block_start", blockStart)...)
-					state.ContentSent = true
-				}
-
-				// Send reasoning content as text delta
-				textDelta := map[string]interface{}{
-					"type":  "content_block_delta",
-					"index": textBlockIndex(state),
-					"delta": map[string]interface{}{
-						"type": "text_delta",
-						"text": choice.Delta.ReasoningContent,
-					},
-				}
-				output = append(output, FormatSSE("content_block_delta", textDelta)...)
-			}
+			// Skip it entirely - GLM thinking is verbose and slows down responses.
+			// Only the actual content matters.
+			// (reasoning_content is silently discarded)
 
 			// Text content - also handle <think> tags from open-source models
 			if content, ok := choice.Delta.Content.(string); ok && content != "" {
