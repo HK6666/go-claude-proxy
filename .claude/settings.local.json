@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose -f docker-compose.proxy.yml up -d 2>&1)",
+      "Bash(systemctl restart docker && systemctl status docker --no-pager -l)",
+      "Bash(git remote set-url origin git@github.com:HK6666/go-claude-proxy.git)",
+      "Bash(git ls-tree -r HEAD --name-only | grep settings.local.json)",
+      "Bash(git add internal/adapter/provider/antigravity/service.go .claude/settings.local.json && git commit --amend --no-edit)"
+    ]
+  }
+}

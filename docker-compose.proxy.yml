@@ -1,0 +1,18 @@
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: cmd/proxy/Dockerfile
+    container_name: claude-proxy
+    restart: unless-stopped
+    ports:
+      - "27659:27659"
+    environment:
+      - GLM_API_KEY=sk-ZPBCpICn2lVtiFzevQ7G0OQiHgIx3wqD
+      - GLM_BASE_URL=https://voyage.prod.telepub.cn/voyage/api
+      - PROXY_PORT=27659
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:27659/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
